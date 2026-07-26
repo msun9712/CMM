@@ -1,0 +1,100 @@
+# Code 1: Metabolite associations with CMM and individual CMDs
+
+library(survival)
+library(caret)
+
+m1 <- train_datam
+m1[, 7:255] <- log1p(m1[, 7:255])
+persd <- m1
+for (i in 7:255) {
+  persd[, i] <- scale(persd[, i])
+}
+
+res <- data.frame()
+for (i in 7:255) {
+  tryCatch({
+    result <- coxph(Surv(time, outcome) ~ persd[, i] + age + sex, data = persd)
+    out <- data.frame(cbind(names(persd)[i],
+                            t(round(summary(result)$coefficients[1, 2], 2)),
+                            t(round(summary(result)$coefficients[1, 1], 2)),
+                            t(round(exp(confint(result))[1], 2)),
+                            t(round(exp(confint(result))[1, 2], 2)),
+                            t(round(summary(result)$coefficients[1, 5], 5))))
+  }, error = function(e) { cat("error", conditionMessage(e), "\n\n") },
+     warning = function(w) { cat("warning", conditionMessage(w), "\n\n") })
+  res <- rbind(out, res)
+}
+colnames(res) <- c("Metabolites.ID", "HR", "beta", "CI1", "CI2", "p")
+res$fdr <- round(p.adjust(res$p, method = 'fdr', n = length(res$p)), 5)
+res$CI <- paste("(", res$CI1, ",", res$CI2, ")", sep = "")
+
+res2 <- data.frame()
+for (i in 7:255) {
+  tryCatch({
+    result <- coxph(Surv(time, outcome) ~ persd[, i] + age + sex + income + ethnic2 + smoking_staus + drinking_freq + pa + sleep_score2 + dietscore + bmi, data = persd)
+    out <- data.frame(cbind(names(persd)[i],
+                            t(round(summary(result)$coefficients[1, 2], 2)),
+                            t(round(summary(result)$coefficients[1, 1], 2)),
+                            t(round(exp(confint(result))[1], 2)),
+                            t(round(exp(confint(result))[1, 2], 2)),
+                            t(round(summary(result)$coefficients[1, 5], 5))))
+  }, error = function(e) { cat("error", conditionMessage(e), "\n\n") },
+     warning = function(w) { cat("warning", conditionMessage(w), "\n\n") })
+  res2 <- rbind(out, res2)
+}
+colnames(res2) <- c("Metabolites.ID", "HR", "beta", "CI1", "CI2", "p")
+res2$fdr <- round(p.adjust(res2$p, method = 'fdr', n = length(res2$p)), 5)
+res2$CI <- paste("(", res2$CI1, ",", res2$CI2, ")", sep = "")
+
+cmd_vars <- c("IHD_in", "Stro_in", "T2DM_in", "HBP_in", "Heartf_in", "CKD_in")
+cmd_times <- c("TimetoIHD", "TimetoStro", "TimetoT2DM", "TimetoHBP", "TimetoHeartf", "TimetoCKD")
+cmd_names <- c("IHD", "Stroke", "T2DM", "Hypertension", "HeartFailure", "CKD")
+
+for (j in 1:6) {
+  persd$outcome_cmd <- persd[[cmd_vars[j]]]
+  persd$time_cmd <- persd[[cmd_times[j]]] / 365.25
+  
+  res_cmd <- data.frame()
+  for (i in 7:255) {
+    tryCatch({
+      result <- coxph(Surv(time_cmd, outcome_cmd) ~ persd[, i] + age + sex + income + ethnic2 + smoking_staus + drinking_freq + pa + sleep_score2 + dietscore + bmi, data = persd)
+      out <- data.frame(cbind(names(persd)[i],
+                              t(round(summary(result)$coefficients[1, 2], 2)),
+                              t(round(summary(result)$coefficients[1, 1], 2)),
+                              t(round(exp(confint(result))[1], 2)),
+                              t(round(exp(confint(result))[1, 2], 2)),
+                              t(round(summary(result)$coefficients[1, 5], 5))))
+    }, error = function(e) { cat("error", conditionMessage(e), "\n\n") },
+       warning = function(w) { cat("warning", conditionMessage(w), "\n\n") })
+    res_cmd <- rbind(out, res_cmd)
+  }
+  colnames(res_cmd) <- c("Metabolites.ID", "HR", "beta", "CI1", "CI2", "p")
+  res_cmd$fdr <- round(p.adjust(res_cmd$p, method = 'fdr', n = length(res_cmd$p)), 5)
+  res_cmd$CI <- paste("(", res_cmd$CI1, ",", res_cmd$CI2, ")", sep = "")
+  write.csv(res_cmd, paste0("metabolite_", cmd_names[j], ".csv"), row.names = FALSE)
+}
+
+m1 <- test_datam
+m1[, 7:255] <- log1p(m1[, 7:255])
+persd <- m1
+for (i in 7:255) {
+  persd[, i] <- scale(persd[, i])
+}
+
+res_test <- data.frame()
+for (i in 7:255) {
+  tryCatch({
+    result <- coxph(Surv(time, outcome) ~ persd[, i] + age + sex + income + ethnic2 + smoking_staus + drinking_freq + pa + sleep_score2 + dietscore + bmi, data = persd)
+    out <- data.frame(cbind(names(persd)[i],
+                            t(round(summary(result)$coefficients[1, 2], 2)),
+                            t(round(summary(result)$coefficients[1, 1], 2)),
+                            t(round(exp(confint(result))[1], 2)),
+                            t(round(exp(confint(result))[1, 2], 2)),
+                            t(round(summary(result)$coefficients[1, 5], 5))))
+  }, error = function(e) { cat("error", conditionMessage(e), "\n\n") },
+     warning = function(w) { cat("warning", conditionMessage(w), "\n\n") })
+  res_test <- rbind(out, res_test)
+}
+colnames(res_test) <- c("Metabolites.ID", "HR", "beta", "CI1", "CI2", "p")
+res_test$fdr <- round(p.adjust(res_test$p, method = 'fdr', n = length(res_test$p)), 5)
+res_test$CI <- paste("(", res_test$CI1, ",", res_test$CI2, ")", sep = "")
