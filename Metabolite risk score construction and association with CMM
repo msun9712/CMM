@@ -1,0 +1,187 @@
+# Code 2: Metabolite risk score construction and association with CMM
+
+library(survival)
+library(glmnet)
+library(data.table)
+library(timeROC)
+library(survminer)
+library(ggplot2)
+library(RColorBrewer)
+
+m1 <- train_datam
+m1[, 7:255] <- log1p(m1[, 7:255])
+persd <- m1
+for (i in 7:255) {
+  persd[, i] <- scale(persd[, i])
+}
+
+res2 <- read.csv("metabolite_CMM_model2.csv")
+res2$p <- as.numeric(res2$fdr)
+metid <- res2$Metabolites.ID[res2$fdr < 0.01]
+
+lasso <- persd[, metid]
+x <- as.matrix(lasso[, 1:length(lasso)])
+time <- as.double(persd$time)
+outcome <- as.double(persd$outcome)
+surv <- Surv(time, outcome)
+
+set.seed(15000)
+cvfit <- cv.glmnet(x, surv, type.measure = "deviance", alpha = 1, family = "cox", nfolds = 10)
+
+get_coe <- function(the_fit, the_lamb) {
+  Coefficients <- coef(the_fit, s = the_lamb)
+  Active.Index <- which(Coefficients != 0)
+  Active.Coefficients <- Coefficients[Active.Index]
+  re <- data.table('var_names' = rownames(Coefficients)[Active.Index],
+                   'coef' = Active.Coefficients)
+  re$expcoef <- exp(re$coef)
+  return(re[order(expcoef)])
+}
+
+z <- get_coe(cvfit, cvfit$lambda.1se)
+write.csv(z, "lasso_coefficients.csv", row.names = FALSE)
+
+score <- persd[, z$var_names]
+sss <- score
+for (i in 1:length(score)) {
+  sss[, i] <- z$coef[i] * score[, i]
+  sss$score <- rowSums(sss[1:i])
+}
+sss <- cbind(persd$id, sss)
+names(sss)[1] <- "id"
+
+m <- merge(m1, sss, by = "id")
+m$score.group <- ifelse(m$score >= quantile(m$score, 0.75, na.rm = TRUE), "3",
+                        ifelse(m$score >= quantile(m$score, 0.50, na.rm = TRUE), "2",
+                               ifelse(m$score >= quantile(m$score, 0.25, na.rm = TRUE), "1", "0")))
+write.csv(m, "score_train.csv", row.names = FALSE)
+
+m <- read.csv("score_train.csv")
+m$score.group <- factor(m$score.group)
+m$time <- m$time / 365.25
+
+time_roc_res <- timeROC(
+  T = m$time,
+  delta = m$outcome,
+  marker = m$score,
+  other_markers = as.matrix(m[, c("age", "sex", "income", "ethnic2", "smoking_staus", "drinking_freq", "pa", "sleep_score2", "dietscore", "bmi")]),
+  cause = 1,
+  weighting = "marginal",
+  times = c(3, 5, 10),
+  iid = FALSE
+)
+
+plot(time_roc_res, time = 3, col = "#BC3C29FF", title = FALSE)
+plot(time_roc_res, time = 5, add = TRUE, col = "#0000CD")
+plot(time_roc_res, time = 10, add = TRUE, col = "#2E8B57")
+legend("bottomright", c("3 Years (AUC=0.731)", "5 Years (AUC=0.743)", "10 Years (AUC=0.763)"),
+       col = c("#BC3C29FF", "#0000CD", "#2e8b57"), lty = 1, lwd = 2)
+
+km <- survfit(Surv(time, outcome) ~ score.group, data = m)
+ggsurvplot(km, pval = TRUE, pval.size = 4, pval.coord = c(2, 0.1),
+           conf.int = TRUE, conf.int.alpha = 0.2, conf.int.style = "ribbon",
+           palette = c("green4", "yellow3", "blue4", "red3"),
+           surv.scale = "percent", xlab = "Years of follow-up",
+           ylab = "Cumulative probability of CMM",
+           legend.title = "metabolite risk scores",
+           censor = FALSE, break.time.by = 2.5, ylim = c(0, 0.1),
+           break.y.by = 0.02, legend = c(0.20, 0.85), fun = "cumhaz")
+
+cmm1 <- coxph(Surv(time, outcome) ~ score.group + age + sex, data = m)
+summary(cmm1)
+cmm2 <- coxph(Surv(time, outcome) ~ score.group + age + sex + income + ethnic2 + factor(smoking_staus) + factor(drinking_freq) + pa + sleep_score2 + dietscore + bmi, data = m)
+summary(cmm2)
+
+m$perscore <- scale(m$score)
+cmm1 <- coxph(Surv(time, outcome) ~ perscore + age + sex, data = m)
+summary(cmm1)
+cmm2 <- coxph(Surv(time, outcome) ~ perscore + age + sex + income + ethnic2 + factor(smoking_staus) + factor(drinking_freq) + pa + sleep_score2 + dietscore + bmi, data = m)
+summary(cmm2)
+
+m$ptrend <- ifelse(m$score.group == 0, -0.40298815,
+                   ifelse(m$score.group == 1, -0.14153766,
+                          ifelse(m$score.group == 2, 0.09458493, 0.42477880)))
+cmm2 <- coxph(Surv(time, outcome) ~ ptrend + age + sex + income + ethnic2 + factor(smoking_staus) + factor(drinking_freq) + pa + sleep_score2 + dietscore + bmi, data = m)
+summary(cmm2)
+
+fit <- pyears(Surv(time, outcome) ~ score.group, data = m, scale = 1)
+fit$event / fit$pyears * 1000
+
+m$cmm_count <- m$IHD_in + m$T2DM_in + m$Stro_in + m$HBP_in + m$Heartf_in + m$CKD_in
+m$cmm_subtype <- ifelse(m$cmm_count == 2, 1, ifelse(m$cmm_count == 3, 2, ifelse(m$cmm_count >= 4, 3, 0)))
+
+for (k in 1:3) {
+  cmm_sub <- subset(m, m$cmm_subtype == k | m$cmm_subtype == 0)
+  cmm_sub$outcome <- ifelse(cmm_sub$cmm_subtype == k, 1, 0)
+  cmm_sub$score.group <- ifelse(cmm_sub$score >= quantile(cmm_sub$score, 0.75, na.rm = TRUE), "3",
+                                ifelse(cmm_sub$score >= quantile(cmm_sub$score, 0.50, na.rm = TRUE), "2",
+                                       ifelse(cmm_sub$score >= quantile(cmm_sub$score, 0.25, na.rm = TRUE), "1", "0")))
+  fit1 <- coxph(Surv(time, outcome) ~ score.group + age + sex, data = cmm_sub)
+  fit2 <- coxph(Surv(time, outcome) ~ score.group + age + sex + income + ethnic2 + factor(smoking_staus) + factor(drinking_freq) + pa + sleep_score2 + dietscore + bmi, data = cmm_sub)
+  print(summary(fit2))
+}
+
+test_datam <- read.csv("test_datam2.csv")
+m1 <- test_datam
+m1[, 7:255] <- log1p(m1[, 7:255])
+persd <- m1
+for (i in 7:255) {
+  persd[, i] <- scale(persd[, i])
+}
+
+z <- read.csv("lasso_coefficients.csv")
+score <- persd[, z$var_names]
+sss <- score
+for (i in 1:length(score)) {
+  sss[, i] <- z$coef[i] * score[, i]
+  sss$score <- rowSums(sss[1:i])
+}
+sss <- cbind(persd$id, sss)
+names(sss)[1] <- "id"
+
+m <- merge(persd, sss, by = "id")
+m$score.group <- ifelse(m$score >= quantile(m$score, 0.75, na.rm = TRUE), "3",
+                        ifelse(m$score >= quantile(m$score, 0.50, na.rm = TRUE), "2",
+                               ifelse(m$score >= quantile(m$score, 0.25, na.rm = TRUE), "1", "0")))
+write.csv(m, "score_test.csv", row.names = FALSE)
+
+m <- read.csv("score_test.csv")
+m$score.group <- factor(m$score.group)
+m$time <- m$time / 365.25
+
+time_roc_res <- timeROC(
+  T = m$time,
+  delta = m$outcome,
+  marker = m$score,
+  other_markers = as.matrix(m[, c("age", "sex", "income", "ethnic2", "smoking_staus", "drinking_freq", "pa", "sleep_score2", "dietscore", "bmi")]),
+  cause = 1,
+  weighting = "marginal",
+  times = c(3, 5, 10),
+  iid = FALSE
+)
+
+km <- survfit(Surv(time, outcome) ~ score.group, data = m)
+ggsurvplot(km, pval = TRUE, pval.size = 4, pval.coord = c(2, 0.1),
+           conf.int = TRUE, conf.int.alpha = 0.2, conf.int.style = "ribbon",
+           palette = c("green4", "yellow3", "blue4", "red3"),
+           surv.scale = "percent", xlab = "Years of follow-up",
+           ylab = "Cumulative probability of CMM",
+           legend.title = "metabolite risk scores",
+           censor = FALSE, break.time.by = 2.5, ylim = c(0, 0.1),
+           break.y.by = 0.02, legend = c(0.20, 0.85), fun = "cumhaz")
+
+cmm2 <- coxph(Surv(time, outcome) ~ score.group + age + sex + income + ethnic2 + factor(smoking_staus) + factor(drinking_freq) + pa + sleep_score2 + dietscore + bmi, data = m)
+summary(cmm2)
+
+age1 <- subset(m, m$age < 60 | m$age == 60)
+age2 <- subset(m, m$age > 60)
+sex1 <- subset(m, m$sex == 1)
+sex2 <- subset(m, m$sex == 0)
+race1 <- subset(m, m$ethnic2 == 1)
+race2 <- subset(m, m$ethnic2 == 0)
+
+subgroups <- list(age1, age2, sex1, sex2, race1, race2)
+for (sg in subgroups) {
+  cmm2 <- coxph(Surv(time, outcome) ~ perscore + age + sex + income + ethnic2 + factor(smoking_staus) + factor(drinking_freq) + pa + sleep_score2 + dietscore + bmi, data = sg)
+  print(summary(cmm2))
+}
